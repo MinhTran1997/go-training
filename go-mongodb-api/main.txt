@@ -1,0 +1,229 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/gorilla/mux"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
+)
+
+// local var to store data get from cloud
+var employeesCollection *mongo.Collection
+
+// this struct is used to map with the data in Cloud
+type Employee struct {
+	ID          primitive.ObjectID `json:"_id,omitempty" bson:"_id,omitempty"`
+	Name        string             `json:"name,omitempty" bson:"name,omitempty"`
+	Department  string             `json:"department,omitempty" bson:"department,omitempty"`
+	Level       string             `json:"level,omitempty" bson:"level,omitempty"`
+	Description string             `json:"description,omitempty" bson:"description,omitempty"`
+}
+
+func homeLink(response http.ResponseWriter, request *http.Request) {
+	fmt.Fprintf(response, "Welcome to 'RESTful API with Golang and MongoDB' session!!!")
+}
+
+func getAllEmployees(response http.ResponseWriter, request *http.Request) {
+	// set header for request
+	response.Header().Set("content-type", "application/json")
+
+	// var employees is a list, plural noun (s) because this is a getAll method
+	var employees []Employee
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// https://docs.mongodb.com/manual/reference/method/db.collection.find/
+	// Selects documents in a collection or view and returns a cursor to the selected documents.
+	cursor, err := employeesCollection.Find(ctx, bson.M{})
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		response.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	defer cursor.Close(ctx)
+
+	// The next document in the cursor returned by the db.collection.find() method
+	// https://docs.mongodb.com/manual/reference/method/cursor.next/#mongodb-method-cursor.next
+	// loop through each item in document, decode that item then assign it to pointer employee var, then append it to employees var (list)
+	for cursor.Next(ctx) {
+		var employee Employee
+		cursor.Decode(&employee)
+		employees = append(employees, employee)
+	}
+	if err := cursor.Err(); err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		response.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+
+	// send employees var to the api's reponse
+	json.NewEncoder(response).Encode(employees)
+}
+
+func getEmployeeByID(response http.ResponseWriter, request *http.Request) {
+	// set header for request
+	response.Header().Set("content-type", "application/json")
+
+	// var employees is not a list, singular noun (s) because this is a getById method
+	var employee Employee
+	// get the ID parameter in the request
+	id, _ := primitive.ObjectIDFromHex(mux.Vars(request)["id"])
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// https://docs.mongodb.com/manual/reference/method/db.collection.findOne/#mongodb-method-db.collection.findOne
+	// Returns one document that satisfies the specified query criteria on the collection or view. If multiple documents satisfy the query, t
+	// his method returns the first document according to the natural order which reflects the order of documents on the disk
+	// . If no document satisfies the query, the method returns null.
+	// Although similar to the find() method, the findOne() method returns a document rather than a cursor.
+	// --> findOne based on ID
+
+	// find data then decode that data then assign to pointer employee
+	err := employeesCollection.FindOne(ctx, Employee{ID: id}).Decode(&employee)
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		response.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+
+	// send employee var to the api's reponse
+	json.NewEncoder(response).Encode(employee)
+}
+
+func deleteEmployeeByID(response http.ResponseWriter, request *http.Request) {
+	// set header for request
+	response.Header().Set("content-type", "application/json")
+
+	// get the ID parameter in the request
+	id, _ := primitive.ObjectIDFromHex(mux.Vars(request)["id"])
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// https://docs.mongodb.com/manual/reference/method/db.collection.deleteOne/
+	// Removes a single document from a collection.
+	// Returns:	A document containing:
+	//  -- A boolean acknowledged as true if the operation ran with write concern or false if write concern was disabled
+	//  -- deletedCount containing the number of deleted documents
+	result, err := employeesCollection.DeleteOne(ctx, Employee{ID: id})
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		response.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+
+	// send employee var to the api's reponse
+	json.NewEncoder(response).Encode(result)
+}
+
+func addEmployee(response http.ResponseWriter, request *http.Request) {
+	// set header for request
+	response.Header().Set("content-type", "application/json")
+
+	// var employees is not a list, singular noun (s) because this is a addEmployee
+	var employee Employee
+
+	// get the request body, decode the request then assign it to pointer employee
+	json.NewDecoder(request.Body).Decode(&employee)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// https://docs.mongodb.com/manual/reference/method/db.collection.insertOne/
+	// Inserts a document into a collection.
+	// Returns:	A document containing:
+	// -- A boolean acknowledged as true if the operation ran with write concern or false if write concern was disabled.
+	// -- A field insertedId with the _id value of the inserted document.
+	result, _ := employeesCollection.InsertOne(ctx, employee)
+
+	// assign the auto-generated ID in cloud database to the ID in the employeesCollection var
+	id := result.InsertedID
+	employee.ID = id.(primitive.ObjectID)
+
+	// the employee parameter in Encode method is not the document in the cloud databse, it is the variable in the local code
+	// the two reference each other
+	json.NewEncoder(response).Encode(employee)
+}
+
+func updateEmployeeById(response http.ResponseWriter, request *http.Request) {
+	// set header for request
+	response.Header().Set("content-type", "application/json")
+
+	var employee Employee
+	id, _ := primitive.ObjectIDFromHex(mux.Vars(request)["id"]) //get ID in request
+	json.NewDecoder(request.Body).Decode(&employee)             // get request body then assign to var employee
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	//https://docs.mongodb.com/manual/reference/method/db.collection.updateOne/
+	// 	The method returns a document that contains:
+	// -- matchedCount containing the number of matched documents
+	// -- modifiedCount containing the number of modified documents
+	// -- upsertedId containing the _id for the upserted document.
+	// -- A boolean acknowledged as true if the operation ran with write concern or false if write concern was disabled
+
+	result, err := employeesCollection.UpdateOne(ctx, Employee{ID: id}, bson.M{"$set": employee})
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		response.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+
+	json.NewEncoder(response).Encode(result)
+}
+
+func main() {
+	// -------- connect to MongoDB cloud --------
+	// create a new client with MongoDB atlas cloud URI
+	client, err := mongo.NewClient(options.Client().ApplyURI("mongodb+srv://minhtran123:123456abc@cluster0.70uwp.mongodb.net/gotraining?retryWrites=true&w=majority"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// connect to MongoDB cloud via given URI
+	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
+	err = client.Connect(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Disconnect(ctx)
+
+	// Ping to check if the connection is valid, successfully
+	err = client.Ping(ctx, readpref.Primary())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// get all the current databases in cloud just to make sure that we can retreive the data in cloud (this step is not mandatory)
+	databases, err := client.ListDatabaseNames(ctx, bson.M{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(databases)
+
+	// -------- get data in MongoDB cloud of a specific database-collection, then assgin to employeesCollection variable to store data in local code --------
+	// note: any changes, update in the local code also affect the data in cloud
+	gotrainingDatabase := client.Database("gotraning")
+	employeesCollection = gotrainingDatabase.Collection("employees")
+
+	// -------- router handlers --------
+	router := mux.NewRouter().StrictSlash(true)
+	router.HandleFunc("/", homeLink)
+	router.HandleFunc("/employees", getAllEmployees).Methods("GET")
+	router.HandleFunc("/employee/{id}", getEmployeeByID).Methods("GET")
+	router.HandleFunc("/employee", addEmployee).Methods("POST")
+	router.HandleFunc("/employee/{id}", updateEmployeeById).Methods("PUT")
+	router.HandleFunc("/employee/{id}", deleteEmployeeByID).Methods("DELETE")
+
+	log.Fatal(http.ListenAndServe(":8081", router))
+}
